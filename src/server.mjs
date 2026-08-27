@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID, timingSafeEqual } from "node:crypto";
-import makeWASocket, { Browsers, DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } from "@whiskeysockets/baileys";
+import makeWASocket, { Browsers, DisconnectReason, useMultiFileAuthState } from "@whiskeysockets/baileys";
 import pino from "pino";
 import QRCode from "qrcode";
 import { disconnectCode, reconnectDelay, shouldReconnect } from "./connection-utils.mjs";
@@ -87,7 +87,7 @@ async function destroySession(id, unlink = true) {
 
 function startSocket(session) {
   if (!sessions.has(session.id) || session.destroying) return;
-  const socket = makeWASocket({ auth: session.authState, version: session.version, logger, browser: Browsers.macOS("Desktop"), markOnlineOnConnect: false, syncFullHistory: true, generateHighQualityLinkPreview: false });
+  const socket = makeWASocket({ auth: session.authState, logger, browser: Browsers.macOS("Desktop"), markOnlineOnConnect: false, syncFullHistory: true, generateHighQualityLinkPreview: false });
   session.socket = socket;
   socket.ev.on("creds.update", session.saveCreds);
   socket.ev.on("contacts.set", ({ contacts }) => contacts.forEach((contact) => session.contacts.set(contact.id, contact)));
@@ -107,7 +107,7 @@ function startSocket(session) {
     if (connection === "close") {
       const code = disconnectCode(lastDisconnect?.error);
       const attempts = session.reconnectAttempts;
-      logger.warn({ sessionId: session.id, code, attempts }, "whatsapp connection closed");
+      logger.warn({ sessionId: session.id, code, attempts, reason: String(lastDisconnect?.error || "") }, "whatsapp connection closed");
       if (shouldReconnect(code, attempts)) {
         session.reconnectAttempts += 1;
         session.status = "reconnecting";
@@ -132,8 +132,7 @@ async function createSession() {
   const id = randomUUID();
   const directory = await mkdtemp(join(tmpdir(), "pulso-wa-"));
   const { state, saveCreds } = await useMultiFileAuthState(directory);
-  const { version } = await fetchLatestBaileysVersion();
-  const session = { id, directory, status: "starting", qrDataUrl: "", error: "", expiresAt: Date.now() + ttlMs, socket: null, authState: state, saveCreds, version, messages: new Map(), contacts: new Map(), chatTokens: new Map(), destroying: false, timer: null, reconnectTimer: null, reconnectAttempts: 0 };
+  const session = { id, directory, status: "starting", qrDataUrl: "", error: "", expiresAt: Date.now() + ttlMs, socket: null, authState: state, saveCreds, messages: new Map(), contacts: new Map(), chatTokens: new Map(), destroying: false, timer: null, reconnectTimer: null, reconnectAttempts: 0 };
   sessions.set(id, session);
   session.timer = setTimeout(() => destroySession(id, true), ttlMs);
   startSocket(session);
