@@ -6,6 +6,7 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import makeWASocket, { Browsers, DisconnectReason, fetchLatestBaileysVersion, useMultiFileAuthState } from "@whiskeysockets/baileys";
 import pino from "pino";
 import QRCode from "qrcode";
+import { disconnectCode, reconnectDelay, shouldReconnect } from "./connection-utils.mjs";
 import { isPrivateChat, maskedContact, messageText, messageTimestamp } from "./message-utils.mjs";
 
 const port = Math.max(1, Number(process.env.PORT || 8080));
@@ -74,6 +75,7 @@ async function destroySession(id, unlink = true) {
   if (!session || session.destroying) return;
   session.destroying = true;
   clearTimeout(session.timer);
+  clearTimeout(session.reconnectTimer);
   try {
     if (unlink && session.status === "connected") await Promise.race([session.socket?.logout(), new Promise((resolve) => setTimeout(resolve, 5000))]);
   } catch (error) { logger.warn({ sessionId: id, error: String(error) }, "logout failed"); }
@@ -83,17 +85,11 @@ async function destroySession(id, unlink = true) {
   sessions.delete(id);
 }
 
-async function createSession() {
-  const id = randomUUID();
-  const directory = await mkdtemp(join(tmpdir(), "pulso-wa-"));
-  const { state, saveCreds } = await useMultiFileAuthState(directory);
-  const { version } = await fetchLatestBaileysVersion();
-  const session = { id, directory, status: "starting", qrDataUrl: "", error: "", expiresAt: Date.now() + ttlMs, socket: null, messages: new Map(), contacts: new Map(), chatTokens: new Map(), destroying: false, timer: null };
-  sessions.set(id, session);
-  session.timer = setTimeout(() => destroySession(id, true), ttlMs);
-  const socket = makeWASocket({ auth: state, version, logger, browser: Browsers.macOS("Desktop"), markOnlineOnConnect: false, syncFullHistory: true, generateHighQualityLinkPreview: false });
+function startSocket(session) {
+  if (!sessions.has(session.id) || session.destroying) return;
+  const socket = makeWASocket({ auth: session.authState, version: session.version, logger, browser: Browsers.macOS("Desktop"), markOnlineOnConnect: false, syncFullHistory: true, generateHighQualityLinkPreview: false });
   session.socket = socket;
-  socket.ev.on("creds.update", saveCreds);
+  socket.ev.on("creds.update", session.saveCreds);
   socket.ev.on("contacts.set", ({ contacts }) => contacts.forEach((contact) => session.contacts.set(contact.id, contact)));
   socket.ev.on("contacts.upsert", (contacts) => contacts.forEach((contact) => session.contacts.set(contact.id, contact)));
   socket.ev.on("messaging-history.set", ({ messages, contacts }) => {
@@ -102,15 +98,45 @@ async function createSession() {
   });
   socket.ev.on("messages.upsert", ({ messages }) => messages.forEach((message) => addMessage(session, message)));
   socket.ev.on("connection.update", async ({ connection, qr, lastDisconnect }) => {
-    if (!sessions.has(id) || session.destroying) return;
-    if (qr) { session.status = "qr"; session.qrDataUrl = await QRCode.toDataURL(qr, { margin: 1, width: 420 }); }
-    if (connection === "open") { session.status = "connected"; session.qrDataUrl = ""; }
+    if (!sessions.has(session.id) || session.destroying || session.socket !== socket) return;
+    if (qr) {
+      const qrDataUrl = await QRCode.toDataURL(qr, { margin: 1, width: 420 });
+      if (session.socket === socket && !session.destroying) { session.status = "qr"; session.qrDataUrl = qrDataUrl; session.error = ""; }
+    }
+    if (connection === "open") { session.status = "connected"; session.qrDataUrl = ""; session.error = ""; session.reconnectAttempts = 0; }
     if (connection === "close") {
-      const code = lastDisconnect?.error?.output?.statusCode;
-      if (code === DisconnectReason.loggedOut) await destroySession(id, false);
+      const code = disconnectCode(lastDisconnect?.error);
+      const attempts = session.reconnectAttempts;
+      logger.warn({ sessionId: session.id, code, attempts }, "whatsapp connection closed");
+      if (shouldReconnect(code, attempts)) {
+        session.reconnectAttempts += 1;
+        session.status = "reconnecting";
+        session.qrDataUrl = "";
+        session.error = "";
+        clearTimeout(session.reconnectTimer);
+        session.reconnectTimer = setTimeout(() => {
+          try { startSocket(session); }
+          catch (error) {
+            logger.error({ sessionId: session.id, error: String(error) }, "whatsapp reconnect failed");
+            session.status = "error";
+            session.error = "Não foi possível restabelecer a conexão. Gere um novo QR Code.";
+          }
+        }, reconnectDelay(code, attempts));
+      } else if (code === DisconnectReason.loggedOut) await destroySession(session.id, false);
       else { session.status = "error"; session.error = "A conexão foi interrompida. Gere um novo QR Code."; }
     }
   });
+}
+
+async function createSession() {
+  const id = randomUUID();
+  const directory = await mkdtemp(join(tmpdir(), "pulso-wa-"));
+  const { state, saveCreds } = await useMultiFileAuthState(directory);
+  const { version } = await fetchLatestBaileysVersion();
+  const session = { id, directory, status: "starting", qrDataUrl: "", error: "", expiresAt: Date.now() + ttlMs, socket: null, authState: state, saveCreds, version, messages: new Map(), contacts: new Map(), chatTokens: new Map(), destroying: false, timer: null, reconnectTimer: null, reconnectAttempts: 0 };
+  sessions.set(id, session);
+  session.timer = setTimeout(() => destroySession(id, true), ttlMs);
+  startSocket(session);
   return session;
 }
 
