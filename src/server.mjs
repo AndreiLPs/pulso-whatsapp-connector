@@ -87,7 +87,7 @@ async function destroySession(id, unlink = true) {
 
 function startSocket(session) {
   if (!sessions.has(session.id) || session.destroying) return;
-  const socket = makeWASocket({ auth: session.authState, logger, browser: Browsers.macOS("Desktop"), markOnlineOnConnect: false, syncFullHistory: true, generateHighQualityLinkPreview: false });
+  const socket = makeWASocket({ auth: session.authState, logger, browser: Browsers.ubuntu("Chrome"), markOnlineOnConnect: false, syncFullHistory: true, generateHighQualityLinkPreview: false });
   session.socket = socket;
   socket.ev.on("creds.update", session.saveCreds);
   socket.ev.on("contacts.set", ({ contacts }) => contacts.forEach((contact) => session.contacts.set(contact.id, contact)));
